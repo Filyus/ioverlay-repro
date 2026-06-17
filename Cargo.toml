@@ -1,0 +1,11 @@
+[package]
+name = "ioverlay-repro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Stock i_overlay 7.0.0 from crates.io (no fork/patch).
+i_overlay = { version = "=7.0.0", features = ["allow_multithreading"] }
+
+[profile.release]
+opt-level = 3
