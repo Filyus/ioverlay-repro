@@ -2,9 +2,9 @@
 
 Minimal reproducer for an `i_overlay 7.0.0` panic on a real degenerate input.
 
-The fixture `culprit-min.iovs` is a minimized version of float input captured from
-`projected_visibility`. It contains 4 contours / 13 points and replays the same
-fixed-scale `FloatOverlay` call:
+The geometry is embedded directly in `src/main.rs`. It is a minimized version of
+float input captured from `projected_visibility`: 4 contours / 13 points, replayed
+with the same fixed-scale `FloatOverlay` call:
 
 - `OverlayRule::Subject`
 - `FillRule::NonZero`

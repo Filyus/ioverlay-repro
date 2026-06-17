@@ -1,25 +1,13 @@
-//! Minimal reproducer for an i_overlay 7.0.0 panic on a real degenerate input.
-//!
-//! Loads `culprit-min.iovs` — a delta-minimized version of the exact float input
-//! that the `projected_visibility` crate handed to i_overlay when projecting one
-//! architectural unit — and replays the same overlay call. The input contains
-//! near-coincident / sub-pixel-sliver contours.
+//! Minimal reproducer for an `i_overlay 7.0.0` OGC extraction panic.
 //!
 //! Expected:
-//!   * debug build  (`cargo run`)            -> panics in i_overlay OGC extraction:
-//!         "assertion failed: overlay_rule.is_fill_top(link.fill)"
-//!   * release build(`cargo run --release`)  -> the assertion is compiled out, so
-//!         the fixed-point core corrupts instead and panics downstream with
-//!         "index out of bounds: the len is N but the index is 9223372036854775807".
-//!
-//! Run:  cargo run        (debug, shows the real assertion)
-//!       cargo run --release
+//!   * `cargo run` panics in debug with:
+//!     `assertion failed: overlay_rule.is_fill_top(link.fill)`
+//!   * `cargo run --release` panics with:
+//!     `index out of bounds: the len is 40 but the index is 9223372036854775807`
 //!
 //! Optional: set `PV_IOVERLAY_OGC=0` to replay the same input with non-OGC
-//! extraction while keeping the captured adapter scale and source geometry.
-
-use std::io::{Cursor, Read};
-use std::path::PathBuf;
+//! extraction. That path returns a result instead of panicking.
 
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay::ShapeType;
@@ -28,130 +16,63 @@ use i_overlay::float::overlay::{FloatOverlay, OverlayOptions};
 use i_overlay::i_float::adapter::FloatPointAdapter;
 
 type Point = [f64; 2];
-type Contour = Vec<Point>;
-type Shape = Vec<Contour>;
-type Shapes = Vec<Shape>;
 type Int = i64;
 
-fn read_u32(c: &mut Cursor<&[u8]>) -> u32 {
-    let mut b = [0u8; 4];
-    c.read_exact(&mut b).unwrap();
-    u32::from_le_bytes(b)
-}
-fn read_f64(c: &mut Cursor<&[u8]>) -> f64 {
-    let mut b = [0u8; 8];
-    c.read_exact(&mut b).unwrap();
-    f64::from_le_bytes(b)
-}
+const FIXED_SCALE: f64 = 50_000.0;
+const CONTOURS: &[&[Point]] = &[
+    &[
+        [24902.9222201258, 11129.9683052215],
+        [24821.9592401258, 11107.1269052215],
+        [24902.9218201258, 11129.9681852215],
+        [24898.9601001258, 11128.8505052215],
+    ],
+    &[
+        [20094.9253001258, 12125.6660652215],
+        [20094.9253001258, 12125.6647652215],
+        [29795.5156201258, 10942.5275852215],
+    ],
+    &[
+        [24902.2200401258, 11129.7702052215],
+        [24902.3098801258, 11129.7955452215],
+        [24902.4788601258, 11129.8432252215],
+    ],
+    &[
+        [24902.4819801258, 11129.8441052215],
+        [24902.4832001258, 11129.8444452215],
+        [24902.4821401258, 11129.8441452215],
+    ],
+];
 
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("culprit-min.iovs"));
-    let bytes = std::fs::read(&path).expect("read .iovs fixture");
-    let mut c = Cursor::new(bytes.as_slice());
-
-    let mut magic = [0u8; 4];
-    c.read_exact(&mut magic).unwrap();
-    assert_eq!(&magic, b"IOVS");
-    let _version = read_u32(&mut c);
-    let rule_code = read_u32(&mut c);
-    let scale = read_f64(&mut c); // IOVERLAY_UNION_FIXED_SCALE used when captured
-    let source_count = read_u32(&mut c) as usize;
-
-    let rule = match rule_code {
-        0 => OverlayRule::Subject,
-        1 => OverlayRule::Clip,
-        2 => OverlayRule::Intersect,
-        3 => OverlayRule::Union,
-        4 => OverlayRule::Difference,
-        5 => OverlayRule::InverseDifference,
-        _ => OverlayRule::Xor,
-    };
-
-    let mut sources: Vec<(ShapeType, Shapes)> = Vec::new();
-    for _ in 0..source_count {
-        let type_code = read_u32(&mut c);
-        let shape_type = if type_code == 0 {
-            ShapeType::Subject
-        } else {
-            ShapeType::Clip
-        };
-        let nshapes = read_u32(&mut c) as usize;
-        let mut shapes: Shapes = Vec::with_capacity(nshapes);
-        for _ in 0..nshapes {
-            let ncontours = read_u32(&mut c) as usize;
-            let mut shape: Shape = Vec::with_capacity(ncontours);
-            for _ in 0..ncontours {
-                let npoints = read_u32(&mut c) as usize;
-                let mut contour: Contour = Vec::with_capacity(npoints);
-                for _ in 0..npoints {
-                    let x = read_f64(&mut c);
-                    let y = read_f64(&mut c);
-                    contour.push([x, y]);
-                }
-                shape.push(contour);
-            }
-            shapes.push(shape);
-        }
-        sources.push((shape_type, shapes));
-    }
-
-    let total_points: usize = sources
+    let shape: Vec<Vec<Point>> = CONTOURS.iter().map(|contour| contour.to_vec()).collect();
+    let total_points = shape.iter().map(|contour| contour.len()).sum();
+    let all_points: Vec<Point> = shape
         .iter()
-        .flat_map(|(_, s)| s.iter())
-        .flat_map(|sh| sh.iter())
-        .map(|c| c.len())
-        .sum();
-    println!(
-        "loaded {}: rule={rule:?}, scale={scale}, {} source(s), {} contour(s), {total_points} points",
-        path.display(),
-        sources.len(),
-        sources
-            .iter()
-            .flat_map(|(_, s)| s.iter())
-            .map(|sh| sh.len())
-            .sum::<usize>(),
-    );
-
-    // Same adapter + options the projected_visibility crate uses.
-    let all_points: Vec<Point> = sources
-        .iter()
-        .flat_map(|(_, shapes)| {
-            shapes
-                .iter()
-                .flat_map(|shape| shape.iter())
-                .flat_map(|contour| contour.iter().copied())
-        })
+        .flat_map(|contour| contour.iter().copied())
         .collect();
-    let adapter: FloatPointAdapter<Point, Int> =
-        match FloatPointAdapter::with_iter_and_scale_checked(all_points.iter(), scale) {
-            Ok(adapter) => {
-                println!("adapter: accepted captured fixed scale {scale}");
-                adapter
-            }
-            Err(err) => {
-                println!("adapter: rejected captured fixed scale {scale}: {err:?}; using automatic scale");
-                FloatPointAdapter::with_iter(all_points.iter())
-            }
-        };
+    let adapter = FloatPointAdapter::<Point, Int>::with_iter_and_scale_checked(
+        all_points.iter(),
+        FIXED_SCALE,
+    )
+    .unwrap();
 
     let mut options: OverlayOptions<f64, Int> = OverlayOptions::default();
     options.clean_result = true;
     options.ogc = std::env::var_os("PV_IOVERLAY_OGC").is_none_or(|value| value != "0");
     options.preserve_output_collinear = true;
+
+    println!(
+        "replaying {} contour(s), {total_points} points, fixed scale {FIXED_SCALE}",
+        shape.len(),
+    );
     println!(
         "options: clean_result={}, ogc={}, preserve_output_collinear={}",
         options.clean_result, options.ogc, options.preserve_output_collinear
     );
 
-    let mut overlay = FloatOverlay::new_custom(adapter, options, Default::default(), total_points);
-    for (shape_type, shapes) in &sources {
-        overlay = overlay.unsafe_add_source(shapes, *shape_type);
-    }
+    let result = FloatOverlay::new_custom(adapter, options, Default::default(), total_points)
+        .unsafe_add_source(&shape, ShapeType::Subject)
+        .overlay(OverlayRule::Subject, FillRule::NonZero);
 
-    println!("calling i_overlay overlay({rule:?}, NonZero) ...");
-    let result = overlay.overlay(rule, FillRule::NonZero);
     println!("OK: produced {} shape(s) (no panic)", result.len());
 }
